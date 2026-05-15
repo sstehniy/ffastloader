@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -140,11 +141,18 @@ func (cl *ConsoleLogger) Finalize(message string) {
 	fmt.Println(message)
 }
 
-func validateURL(url string) error {
-	if !strings.Contains(url, "paste.fitgirl-repacks.site") {
-		return fmt.Errorf("invalid URL: must contain paste.fitgirl-repacks.site")
+func validateURL(rawURL string) error {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return fmt.Errorf("invalid URL: must be a valid absolute URL")
 	}
-	return nil
+
+	host := strings.ToLower(parsedURL.Hostname())
+	if host == "paste.fitgirl-repacks.site" || host == "www.paste.fitgirl-repacks.site" || host == "fuckingfast.co" || host == "www.fuckingfast.co" {
+		return nil
+	}
+
+	return fmt.Errorf("invalid URL: host must be paste.fitgirl-repacks.site or fuckingfast.co")
 }
 
 // groupDownloadLinks organizes download links into related groups
@@ -716,8 +724,18 @@ func downloadRar(link string, browser playwright.Browser, config Config) bool {
 }
 
 // extractUrls extracts URLs from the given page.
-func extractUrls(url string, browser playwright.Browser) ([]string, error) {
+// Supports both old paste list markup and new table-based markup.
+func extractUrls(startURL string, browser playwright.Browser) ([]string, error) {
 	var links []string
+	seen := make(map[string]struct{})
+
+	// Reject direct file URLs and require a listing page.
+	if parsedURL, err := url.Parse(startURL); err == nil {
+		host := strings.ToLower(parsedURL.Hostname())
+		if (host == "fuckingfast.co" || host == "www.fuckingfast.co") && !strings.HasPrefix(parsedURL.Path, "/d/") {
+			return nil, fmt.Errorf("invalid URL: use a fuckingfast listing URL in /d/<id> format or in the paste.fitgirl-repacks.site/<id> format")
+		}
+	}
 
 	page, err := browser.NewPage()
 	if err != nil {
@@ -725,31 +743,52 @@ func extractUrls(url string, browser playwright.Browser) ([]string, error) {
 	}
 	defer page.Close()
 
-	_, err = page.Goto(url, playwright.PageGotoOptions{
+	_, err = page.Goto(startURL, playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateNetworkidle,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("navigation failed: %w", err)
 	}
 
-	entries, err := page.Locator("#plaintext ul li a").All()
-	if err != nil {
-		return nil, fmt.Errorf("could not get entries: %w", err)
-	}
+	selectors := []string{"#tbody tr td a", "#plaintext ul li a"}
+	baseURL, _ := url.Parse(startURL)
 
-	for _, entry := range entries {
-		href, err := entry.GetAttribute("href")
+	for _, selector := range selectors {
+		entries, err := page.Locator(selector).All()
 		if err != nil {
-			log.Printf("warning: could not get href attribute: %v", err)
+			log.Printf("warning: could not get entries for selector %q: %v", selector, err)
 			continue
 		}
-		if href != "" {
-			links = append(links, href)
+
+		for _, entry := range entries {
+			href, err := entry.GetAttribute("href")
+			if err != nil {
+				log.Printf("warning: could not get href attribute: %v", err)
+				continue
+			}
+
+			href = strings.TrimSpace(href)
+			if href == "" {
+				continue
+			}
+
+			resolvedHref := href
+			if baseURL != nil {
+				if hrefURL, hrefErr := url.Parse(href); hrefErr == nil {
+					resolvedHref = baseURL.ResolveReference(hrefURL).String()
+				}
+			}
+
+			if _, exists := seen[resolvedHref]; exists {
+				continue
+			}
+			seen[resolvedHref] = struct{}{}
+			links = append(links, resolvedHref)
 		}
 	}
 
 	if len(links) == 0 {
-		return nil, fmt.Errorf("no links found on the page")
+		return nil, fmt.Errorf("no links found on the page (checked selectors: #tbody tr td a, #plaintext ul li a)")
 	}
 
 	return links, nil

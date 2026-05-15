@@ -1,6 +1,6 @@
 # Fucking Loader
 
-A command-line tool for downloading multi-part archives from paste.fitgirl-repacks.site links.
+A command-line tool for downloading multi-part archives from paste.fitgirl-repacks.site and fuckingfast.co/d/ links.
 
 ## Features
 
