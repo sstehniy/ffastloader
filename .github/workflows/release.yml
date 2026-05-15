@@ -77,19 +77,19 @@ jobs:
         run: go mod download
 
       - name: Build for Windows
-        run: GOOS=windows GOARCH=amd64 go build -o fuckingloader-windows-amd64.exe -ldflags "-s -w" .
+        run: GOOS=windows GOARCH=amd64 go build -o ffastloader-windows-amd64.exe -ldflags "-s -w" .
 
       - name: Build for macOS (Intel)
-        run: GOOS=darwin GOARCH=amd64 go build -o fuckingloader-darwin-amd64 -ldflags "-s -w" .
+        run: GOOS=darwin GOARCH=amd64 go build -o ffastloader-darwin-amd64 -ldflags "-s -w" .
 
       - name: Build for macOS (Apple Silicon)
-        run: GOOS=darwin GOARCH=arm64 go build -o fuckingloader-darwin-arm64 -ldflags "-s -w" .
+        run: GOOS=darwin GOARCH=arm64 go build -o ffastloader-darwin-arm64 -ldflags "-s -w" .
 
       - name: Build for Linux (amd64)
-        run: GOOS=linux GOARCH=amd64 go build -o fuckingloader-linux-amd64 -ldflags "-s -w" .
+        run: GOOS=linux GOARCH=amd64 go build -o ffastloader-linux-amd64 -ldflags "-s -w" .
 
       - name: Build for Linux (arm64)
-        run: GOOS=linux GOARCH=arm64 go build -o fuckingloader-linux-arm64 -ldflags "-s -w" .
+        run: GOOS=linux GOARCH=arm64 go build -o ffastloader-linux-arm64 -ldflags "-s -w" .
 
       - name: Create release
         id: create_release
@@ -98,11 +98,11 @@ jobs:
           name: Release v${{ steps.version.outputs.VERSION }}
           tag_name: v${{ steps.version.outputs.VERSION }}
           files: |
-            fuckingloader-windows-amd64.exe
-            fuckingloader-darwin-amd64
-            fuckingloader-darwin-arm64
-            fuckingloader-linux-amd64
-            fuckingloader-linux-arm64
+            ffastloader-windows-amd64.exe
+            ffastloader-darwin-amd64
+            ffastloader-darwin-arm64
+            ffastloader-linux-amd64
+            ffastloader-linux-arm64
           draft: false
           prerelease: false
           generate_release_notes: true

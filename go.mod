@@ -1,4 +1,4 @@
-module fuckingloader
+module ffastloader
 
 go 1.23.4
 

@@ -4,8 +4,8 @@
 *.dll
 *.so
 *.dylib
-fuckingloader
-fuckingloader-*
+ffastloader
+ffastloader-*
 
 # Test binary, built with `go test -c`
 *.test

@@ -15,14 +15,14 @@ A command-line tool for downloading multi-part archives from paste.fitgirl-repac
 
 ### Download Pre-built Binaries
 
-Pre-built binaries are available for download from the [Releases](https://github.com/sstehniy/fuckingloader/releases) page.
+Pre-built binaries are available for download from the [Releases](https://github.com/sstehniy/ffastloader/releases) page.
 
 Choose the appropriate version for your platform:
-- Windows: `fuckingloader-windows-amd64.exe`
-- macOS (Intel): `fuckingloader-darwin-amd64`
-- macOS (Apple Silicon): `fuckingloader-darwin-arm64`
-- Linux (x64): `fuckingloader-linux-amd64`
-- Linux (ARM64): `fuckingloader-linux-arm64`
+- Windows: `ffastloader-windows-amd64.exe`
+- macOS (Intel): `ffastloader-darwin-amd64`
+- macOS (Apple Silicon): `ffastloader-darwin-arm64`
+- Linux (x64): `ffastloader-linux-amd64`
+- Linux (ARM64): `ffastloader-linux-arm64`
 
 ### Build from Source
 
@@ -30,24 +30,24 @@ If you prefer to build from source, you'll need Go 1.18 or later:
 
 ```bash
 # Clone the repository
-git clone https://github.com/sstehniy/fuckingloader.git
-cd fuckingloader
+git clone https://github.com/sstehniy/ffastloader.git
+cd ffastloader
 
 # Install dependencies
 go mod download
 
 # Build the program
-go build -o fuckingloader
+go build -o ffastloader
 ```
 
 ## Usage
 
 ```bash
 # Basic usage
-./fuckingloader "https://paste.fitgirl-repacks.site/your-paste-url"
+./ffastloader "https://paste.fitgirl-repacks.site/your-paste-url"
 
 # With options
-./fuckingloader --workers 5 --dir "downloads" --timeout 60 --retry 5 "https://paste.fitgirl-repacks.site/your-paste-url"
+./ffastloader --workers 5 --dir "downloads" --timeout 60 --retry 5 "https://paste.fitgirl-repacks.site/your-paste-url"
 ```
 
 ### Command-line Flags
