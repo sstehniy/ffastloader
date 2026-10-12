@@ -3,21 +3,28 @@ package main
 import (
 	"bufio"
 	"container/ring"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/eiannone/keyboard"
-	"github.com/playwright-community/playwright-go"
+	"github.com/mxschmitt/playwright-go"
 	"github.com/schollz/progressbar/v3"
 )
 
@@ -55,6 +62,8 @@ func NewConsoleLogger(maxLines int, totalItems int64, description string) *Conso
 		messages: ring.New(maxLines),
 		progressBar: progressbar.NewOptions64(
 			totalItems,
+			progressbar.OptionSetWriter(io.Discard),
+			progressbar.OptionSetRenderBlankState(true),
 			progressbar.OptionSetDescription(description),
 			progressbar.OptionSetItsString("file"),
 			progressbar.OptionShowIts(),
@@ -98,11 +107,7 @@ func (cl *ConsoleLogger) UpdateProgress(n int) {
 
 // redraw clears the console and redraws the progress bar and messages
 func (cl *ConsoleLogger) redraw() {
-	// Clear screen from cursor to end of screen
-	fmt.Print("\033[J")
-
-	// Move cursor to beginning of line and print progress bar
-	fmt.Print("\033[H")
+	fmt.Print("\033[H\033[J")
 	fmt.Println(cl.progressBar.String())
 	fmt.Println()
 
@@ -272,6 +277,19 @@ func interactiveSelection(groups []FileGroup) []FileGroup {
 	}
 	defer keyboard.Close()
 
+	if runtime.GOOS != "windows" {
+		keypadStart, startErr := exec.Command("tput", "smkx").Output()
+		keypadEnd, endErr := exec.Command("tput", "rmkx").Output()
+		if startErr != nil || endErr != nil {
+			keyboard.Close()
+			log.Println("Could not configure terminal keys; falling back to number selection")
+			return promptForSelection(groups)
+		}
+		// Terminfo key sequences expect keypad transmit mode, which keyboard.Open does not enable.
+		fmt.Print(string(keypadStart))
+		defer fmt.Print(string(keypadEnd))
+	}
+
 	currentPos := 0
 
 	// Function to clear screen and print the current selection state
@@ -382,12 +400,12 @@ func interactiveSelection(groups []FileGroup) []FileGroup {
 		case keyboard.KeyEsc:
 			// Exit
 			fmt.Println("\nOperation cancelled by user.")
-			os.Exit(0)
+			return nil
 		default:
 			// Handle regular keys
 			if char == 'q' || char == 'Q' {
 				fmt.Println("\nOperation cancelled by user.")
-				os.Exit(0)
+				return nil
 			}
 		}
 
@@ -478,6 +496,12 @@ func pluralize(word string, count int) string {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	// Parse command line flags
 	config := Config{}
 
@@ -485,7 +509,7 @@ func main() {
 	flag.StringVar(&config.DownloadDir, "dir", "downloads", "Directory to save downloads")
 	flag.IntVar(&config.Timeout, "timeout", 30, "Timeout in seconds for network operations")
 	flag.IntVar(&config.RetryAttempts, "retry", 3, "Number of retry attempts for failed downloads")
-	flag.BoolVar(&config.Headless, "headless", true, "Run browser in headless mode")
+	flag.BoolVar(&config.Headless, "headless", true, "Hide the browser used for link extraction")
 	flag.BoolVar(&config.SkipSelection, "skip-selection", false, "Skip file group selection and download all files")
 	flag.IntVar(&config.LogLines, "log-lines", 3, "Number of log lines to display during download")
 
@@ -494,19 +518,21 @@ func main() {
 	// Check if a URL was provided
 	args := flag.Args()
 	if len(args) < 1 {
-		log.Fatal("Usage: program [flags] <starturl>\nRun with -h for help")
+		return fmt.Errorf("usage: ffastloader [flags] <starturl>\nRun with -h for help")
 	}
 
 	config.StartURL = args[0]
 
-	// Create downloads directory if it doesn't exist
-	if err := os.MkdirAll(config.DownloadDir, 0755); err != nil {
-		log.Fatalf("Failed to create downloads directory: %v", err)
+	if config.WorkerCount < 1 || config.RetryAttempts < 1 || config.Timeout < 1 || config.LogLines < 1 {
+		return fmt.Errorf("workers, retry, timeout, and log-lines must all be at least 1")
 	}
 
 	// Validate the URL
 	if err := validateURL(config.StartURL); err != nil {
-		log.Fatal(err)
+		return err
+	}
+	if err := os.MkdirAll(config.DownloadDir, 0755); err != nil {
+		return fmt.Errorf("create download directory: %w", err)
 	}
 
 	log.Printf("Starting download from: %s", config.StartURL)
@@ -514,37 +540,38 @@ func main() {
 	log.Printf("Using %d workers", config.WorkerCount)
 
 	// Install Playwright if needed
-	if err := playwright.Install(); err != nil {
-		log.Fatalf("Failed to install Playwright driver: %v", err)
+	if err := playwright.Install(&playwright.RunOptions{Browsers: []string{"chromium"}}); err != nil {
+		return fmt.Errorf("install Playwright: %w", err)
 	}
 
 	// Start Playwright and launch the browser
 	pw, err := playwright.Run()
 	if err != nil {
-		log.Fatalf("Could not start Playwright: %v", err)
+		return fmt.Errorf("start Playwright: %w", err)
 	}
-
-	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(config.Headless),
-	})
+	defer pw.Stop()
+	configDir, err := os.UserConfigDir()
 	if err != nil {
-		log.Fatalf("Could not launch browser: %v", err)
+		return fmt.Errorf("find browser profile directory: %w", err)
 	}
-
+	session, err := newBrowserSession(pw, filepath.Join(configDir, "ffastloader", "browser"), config)
+	if err != nil {
+		return err
+	}
 	defer func() {
-		if err := browser.Close(); err != nil {
+		if err := session.context.Close(); err != nil {
 			log.Printf("Could not close browser: %v", err)
-		}
-		if err := pw.Stop(); err != nil {
-			log.Printf("Could not stop Playwright: %v", err)
 		}
 	}()
 
 	// Extract download links
 	log.Println("Extracting download links...")
-	links, err := extractUrls(config.StartURL, browser)
+	links, err := extractUrls(config.StartURL, session)
 	if err != nil {
-		log.Fatalf("Failed to extract URLs: %v", err)
+		return fmt.Errorf("extract URLs: %w", err)
+	}
+	if err := session.context.Close(); err != nil {
+		return fmt.Errorf("close link extraction browser: %w", err)
 	}
 	log.Printf("Found %d links to download", len(links))
 
@@ -567,21 +594,33 @@ func main() {
 
 	if len(selectedLinks) == 0 {
 		log.Println("No files selected for download. Exiting.")
-		return
+		return nil
 	}
 
+	downloader, err := newFileDownloader(config)
+	if err != nil {
+		return err
+	}
+	defer downloader.resolver.CloseIdleConnections()
+	defer downloader.transfer.CloseIdleConnections()
 	log.Printf("Preparing to download %d files", len(selectedLinks))
 
 	// Clear the screen before starting the download process
 	fmt.Print("\033[H\033[2J")
 
 	// Create the console logger with fixed progress bar
-	logger := NewConsoleLogger(config.LogLines, int64(len(selectedLinks)), "Downloading files")
+	logger := NewConsoleLogger(config.LogLines, int64(len(selectedLinks)), "Processing files")
 
 	// Create a channel for the URLs
 	jobs := make(chan string, len(selectedLinks))
-	results := make(chan bool, len(selectedLinks))
+	type downloadResult struct {
+		link string
+		err  error
+	}
+	results := make(chan downloadResult, len(selectedLinks))
 	var wg sync.WaitGroup
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
 	// Launch worker pool
 	for i := 0; i < config.WorkerCount; i++ {
@@ -589,25 +628,41 @@ func main() {
 		go func(workerID int) {
 			defer wg.Done()
 			for url := range jobs {
-				success := false
+				if ctx.Err() != nil {
+					return
+				}
+				var downloadErr error
+			retries:
 				for attempt := 1; attempt <= config.RetryAttempts; attempt++ {
 					if attempt > 1 {
 						logger.Log("[Worker %d] Retry attempt %d/%d for %s",
 							workerID, attempt, config.RetryAttempts, url)
 					}
 
-					if downloadRarWithLogger(url, browser, config, logger, workerID) {
-						success = true
+					downloadErr = downloader.download(ctx, url, logger, workerID)
+					if downloadErr == nil {
+						break
+					}
+					if ctx.Err() != nil {
+						break
+					}
+					logger.Log("[Worker %d] %s: %v", workerID, extractFilenameFromURL(url), downloadErr)
+					if errors.Is(downloadErr, errAccessBlocked) {
+						cancel()
 						break
 					}
 
 					// Wait before retrying
 					if attempt < config.RetryAttempts {
-						time.Sleep(time.Duration(attempt) * 2 * time.Second)
+						select {
+						case <-ctx.Done():
+							break retries
+						case <-time.After(time.Duration(attempt) * 2 * time.Second):
+						}
 					}
 				}
 
-				results <- success
+				results <- downloadResult{link: url, err: downloadErr}
 				logger.UpdateProgress(1)
 			}
 		}(i + 1)
@@ -619,113 +674,34 @@ func main() {
 	}
 	close(jobs)
 
-	// Collect results
-	successCount := 0
-	go func() {
-		for success := range results {
-			if success {
-				successCount++
-			}
-		}
-	}()
-
 	// Wait for workers to finish
 	wg.Wait()
 	close(results)
+	successCount := 0
+	var failures []string
+	for result := range results {
+		if result.err == nil {
+			successCount++
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %v", extractFilenameFromURL(result.link), result.err))
+		}
+	}
 
 	// Show the final results
-	logger.Finalize(fmt.Sprintf("Downloads completed: %d/%d successful\nAll operations completed.",
-		successCount, len(selectedLinks)))
-}
-
-const BUTTON_SELECTOR = ".link-button.text-5xl"
-
-// downloadRar navigates to a URL and downloads the matching RAR file.
-// Returns true if download was successful, false otherwise.
-func downloadRar(link string, browser playwright.Browser, config Config) bool {
-	// Create a new page for the download.
-	page, err := browser.NewPage(playwright.BrowserNewPageOptions{
-		AcceptDownloads: playwright.Bool(true),
-	})
-	if err != nil {
-		log.Printf("[%s] Failed to create page: %v", link, err)
-		return false
+	summary := fmt.Sprintf("Downloads completed: %d/%d successful", successCount, len(selectedLinks))
+	if len(failures) > 0 {
+		summary += "\n" + strings.Join(failures, "\n")
 	}
-	defer page.Close()
-
-	// Set a custom timeout based on config
-	timeout := float64(config.Timeout * 1000) // Convert seconds to ms
-
-	// Navigate to the download page.
-	_, err = page.Goto(link, playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
-		Timeout:   playwright.Float(timeout),
-	})
-	if err != nil {
-		log.Printf("[%s] Navigation failed: %v", link, err)
-		return false
+	logger.Finalize(summary)
+	if successCount != len(selectedLinks) {
+		return fmt.Errorf("%d of %d downloads did not complete", len(selectedLinks)-successCount, len(selectedLinks))
 	}
-
-	// Wait for the button to be visible.
-	button := page.Locator(BUTTON_SELECTOR)
-	if err = button.WaitFor(playwright.LocatorWaitForOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(timeout / 3), // Shorter timeout for UI elements
-	}); err != nil {
-		log.Printf("[%s] Button not found: %v", link, err)
-		return false
-	}
-
-	// Perform the first click.
-	log.Printf("[%s] Performing first click...", link)
-	if err = button.Click(playwright.LocatorClickOptions{
-		Timeout: playwright.Float(timeout / 3),
-	}); err != nil {
-		log.Printf("[%s] First click failed: %v", link, err)
-		return false
-	}
-
-	// Allow some time for the page to update.
-	time.Sleep(2 * time.Second)
-	if err = button.WaitFor(playwright.LocatorWaitForOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(timeout / 3),
-	}); err != nil {
-		log.Printf("[%s] Button not visible after first click: %v", link, err)
-		return false
-	}
-
-	// Use ExpectDownload to wait for the download event after the second click.
-	log.Printf("[%s] Performing second click to start download...", link)
-	download, err := page.ExpectDownload(func() error {
-		return button.Click(playwright.LocatorClickOptions{
-			Timeout: playwright.Float(timeout / 3),
-		})
-	})
-	if err != nil {
-		log.Printf("[%s] Download event error: %v", link, err)
-		return false
-	}
-
-	// Retrieve the suggested filename.
-	suggestedName := download.SuggestedFilename()
-
-	downloadPath := filepath.Join(config.DownloadDir, suggestedName)
-	log.Printf("[%s] Starting download of: %s", link, suggestedName)
-
-	// Save the downloaded file.
-	if err = download.SaveAs(downloadPath); err != nil {
-		log.Printf("[%s] Failed to save download: %v", link, err)
-		return false
-	}
-
-	log.Printf("[%s] Download completed: %s", link, downloadPath)
-	return true
+	return nil
 }
 
 // extractUrls extracts URLs from the given page.
 // Supports both old paste list markup and new table-based markup.
-func extractUrls(startURL string, browser playwright.Browser) ([]string, error) {
+func extractUrls(startURL string, session *browserSession) ([]string, error) {
 	var links []string
 	seen := make(map[string]struct{})
 
@@ -737,18 +713,11 @@ func extractUrls(startURL string, browser playwright.Browser) ([]string, error) 
 		}
 	}
 
-	page, err := browser.NewPage()
+	page, err := session.openPage(startURL, "#tbody tr td a, #plaintext ul li a", log.Printf)
 	if err != nil {
-		return nil, fmt.Errorf("could not create page: %w", err)
+		return nil, err
 	}
 	defer page.Close()
-
-	_, err = page.Goto(startURL, playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("navigation failed: %w", err)
-	}
 
 	selectors := []string{"#tbody tr td a", "#plaintext ul li a"}
 	baseURL, _ := url.Parse(startURL)
@@ -792,91 +761,4 @@ func extractUrls(startURL string, browser playwright.Browser) ([]string, error) 
 	}
 
 	return links, nil
-}
-
-// downloadRarWithLogger navigates to a URL and downloads the matching RAR file.
-// Uses the ConsoleLogger for output. Returns true if download was successful, false otherwise.
-func downloadRarWithLogger(link string, browser playwright.Browser, config Config, logger *ConsoleLogger, workerID int) bool {
-	// Create a new page for the download.
-	page, err := browser.NewPage(playwright.BrowserNewPageOptions{
-		AcceptDownloads: playwright.Bool(true),
-	})
-	if err != nil {
-		logger.Log("[Worker %d] Failed to create page: %v", workerID, err)
-		return false
-	}
-	defer page.Close()
-
-	// Set a custom timeout based on config
-	timeout := float64(config.Timeout * 1000) // Convert seconds to ms
-
-	// Extract the filename from the link for logging
-	filename := extractFilenameFromURL(link)
-
-	// Navigate to the download page.
-	logger.Log("[Worker %d] Navigating to download page for %s", workerID, filename)
-	_, err = page.Goto(link, playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
-		Timeout:   playwright.Float(timeout),
-	})
-	if err != nil {
-		logger.Log("[Worker %d] Navigation failed: %v", workerID, err)
-		return false
-	}
-
-	// Wait for the button to be visible.
-	button := page.Locator(BUTTON_SELECTOR)
-	if err = button.WaitFor(playwright.LocatorWaitForOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(timeout / 3), // Shorter timeout for UI elements
-	}); err != nil {
-		logger.Log("[Worker %d] Button not found: %v", workerID, err)
-		return false
-	}
-
-	// Perform the first click.
-	logger.Log("[Worker %d] Performing first click for %s", workerID, filename)
-	if err = button.Click(playwright.LocatorClickOptions{
-		Timeout: playwright.Float(timeout / 3),
-	}); err != nil {
-		logger.Log("[Worker %d] First click failed: %v", workerID, err)
-		return false
-	}
-
-	// Allow some time for the page to update.
-	time.Sleep(2 * time.Second)
-	if err = button.WaitFor(playwright.LocatorWaitForOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(timeout / 3),
-	}); err != nil {
-		logger.Log("[Worker %d] Button not visible after first click: %v", workerID, err)
-		return false
-	}
-
-	// Use ExpectDownload to wait for the download event after the second click.
-	logger.Log("[Worker %d] Performing second click to start download...", workerID)
-	download, err := page.ExpectDownload(func() error {
-		return button.Click(playwright.LocatorClickOptions{
-			Timeout: playwright.Float(timeout / 3),
-		})
-	})
-	if err != nil {
-		logger.Log("[Worker %d] Download event error: %v", workerID, err)
-		return false
-	}
-
-	// Retrieve the suggested filename.
-	suggestedName := download.SuggestedFilename()
-
-	downloadPath := filepath.Join(config.DownloadDir, suggestedName)
-	logger.Log("[Worker %d] Starting download of: %s", workerID, suggestedName)
-
-	// Save the downloaded file.
-	if err = download.SaveAs(downloadPath); err != nil {
-		logger.Log("[Worker %d] Failed to save download: %v", workerID, err)
-		return false
-	}
-
-	logger.Log("[Worker %d] Download completed: %s", workerID, suggestedName)
-	return true
 }

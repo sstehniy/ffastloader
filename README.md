@@ -26,7 +26,7 @@ Choose the appropriate version for your platform:
 
 ### Build from Source
 
-If you prefer to build from source, you'll need Go 1.18 or later:
+If you prefer to build from source, you'll need Go 1.24.1 or later:
 
 ```bash
 # Clone the repository
@@ -50,17 +50,34 @@ go build -o ffastloader
 ./ffastloader --workers 5 --dir "downloads" --timeout 60 --retry 5 "https://paste.fitgirl-repacks.site/your-paste-url"
 ```
 
+File downloads use the host's direct download endpoint with a Chrome-compatible TLS handshake. The app does not open individual file pages or click download buttons. Files transfer directly to your computer; no proxy or CAPTCHA service is used. Incomplete transfers use temporary files and never replace an existing completed file.
+
+A hidden browser extracts links from the listing, including encrypted paste pages, then closes before file selection. If the listing itself requires verification, rerun with `--headless=false` to show that browser. Its profile is stored under your system's user configuration directory (`~/Library/Application Support/ffastloader/browser` on macOS).
+
+If the file endpoint refuses a request, the app reports the HTTP error and stops the queue. Failed files and their errors remain in the final summary. The progress bar counts completed files, so it stays at 0% until the first file finishes. Ctrl+C cancels active transfers and removes their temporary files.
+
 ### Command-line Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--workers` | 3 | Number of concurrent download workers |
 | `--dir` | "downloads" | Directory to save downloads |
-| `--timeout` | 30 | Timeout in seconds for network operations |
+| `--timeout` | 30 | Timeout in seconds for navigation, page controls, and download startup; file transfers can take longer |
 | `--retry` | 3 | Number of retry attempts for failed downloads |
-| `--headless` | true | Run browser in headless mode (true/false) |
+| `--headless` | true | Hide the browser used to extract listing links |
 | `--skip-selection` | false | Skip file group selection and download all files |
 | `--log-lines` | 3 | Number of log lines to display during download |
+
+### Verification
+
+Tests cover listing extraction, verification pages, cookie reuse, concurrent direct downloads, truncated responses, cancellation, and preservation of existing files:
+
+```bash
+go run github.com/mxschmitt/playwright-go/cmd/playwright@v0.6201.1 install chromium
+go test -race ./...
+```
+
+The terminal selection test also needs Python 3 and `tput` on macOS/Linux.
 
 ## Interactive Selection
 
